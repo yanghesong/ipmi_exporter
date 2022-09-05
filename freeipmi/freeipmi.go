@@ -35,8 +35,6 @@ import (
 var (
 	ipmiDCMICurrentPowerRegex         = regexp.MustCompile(`^Current Power\s*:\s*(?P<value>[0-9.]*)\s*Watts.*`)
 	ipmiChassisPowerRegex             = regexp.MustCompile(`^System Power\s*:\s(?P<value>.*)`)
-	ipmiSELEntriesRegex               = regexp.MustCompile(`^Number of log entries\s*:\s(?P<value>[0-9.]*)`)
-	ipmiSELFreeSpaceRegex             = regexp.MustCompile(`^Free space remaining\s*:\s(?P<value>[0-9.]*)\s*bytes.*`)
 	bmcInfoFirmwareRevisionRegex      = regexp.MustCompile(`^Firmware Revision\s*:\s*(?P<value>[0-9.]*).*`)
 	bmcInfoSystemFirmwareVersionRegex = regexp.MustCompile(`^System Firmware Version\s*:\s*(?P<value>[0-9.]*).*`)
 	bmcInfoManufacturerIDRegex        = regexp.MustCompile(`^Manufacturer ID\s*:\s*(?P<value>.*)`)
@@ -45,8 +43,8 @@ var (
 // Result represents the outcome of a call to one of the FreeIPMI tools.
 // It can be used with other functions in this package to extract data.
 type Result struct {
-	output []byte
-	err    error
+	Output []byte
+	Err    error
 }
 
 // SensorData represents the reading of a single sensor.
@@ -100,7 +98,7 @@ func getValue(ipmiOutput []byte, regex *regexp.Regexp) (string, error) {
 	return "", fmt.Errorf("could not find value in output: %s", string(ipmiOutput))
 }
 
-func freeipmiConfigPipe(config string, logger log.Logger) (string, error) {
+func freeIpmiConfigPipe(config string, logger log.Logger) (string, error) {
 	content := []byte(config)
 	pipe, err := pipeName()
 	if err != nil {
@@ -114,10 +112,16 @@ func freeipmiConfigPipe(config string, logger log.Logger) (string, error) {
 	go func(file string, data []byte) {
 		f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND, os.ModeNamedPipe)
 		if err != nil {
-			level.Error(logger).Log("msg", "Error opening pipe", "error", err)
+			err := level.Error(logger).Log("msg", "Error opening pipe", "error", err)
+			if err != nil {
+				return
+			}
 		}
 		if _, err := f.Write(data); err != nil {
-			level.Error(logger).Log("msg", "Error writing config to pipe", "error", err)
+			err := level.Error(logger).Log("msg", "Error writing config to pipe", "error", err)
+			if err != nil {
+				return
+			}
 		}
 		f.Close()
 	}(pipe, content)
@@ -125,13 +129,16 @@ func freeipmiConfigPipe(config string, logger log.Logger) (string, error) {
 }
 
 func Execute(cmd string, args []string, config string, target string, logger log.Logger) Result {
-	pipe, err := freeipmiConfigPipe(config, logger)
+	pipe, err := freeIpmiConfigPipe(config, logger)
 	if err != nil {
 		return Result{nil, err}
 	}
 	defer func() {
 		if err := os.Remove(pipe); err != nil {
-			level.Error(logger).Log("msg", "Error deleting named pipe", "error", err)
+			err := level.Error(logger).Log("msg", "Error deleting named pipe", "error", err)
+			if err != nil {
+				return
+			}
 		}
 	}()
 
@@ -140,7 +147,10 @@ func Execute(cmd string, args []string, config string, target string, logger log
 		args = append(args, "-h", target)
 	}
 
-	level.Debug(logger).Log("msg", "Executing", "command", cmd, "args", fmt.Sprintf("%+v", args))
+	err = level.Debug(logger).Log("msg", "Executing", "command", cmd, "args", fmt.Sprintf("%+v", args))
+	if err != nil {
+		return Result{}
+	}
 	out, err := exec.Command(cmd, args...).CombinedOutput()
 	if err != nil {
 		err = fmt.Errorf("error running %s: %s", cmd, err)
@@ -151,11 +161,11 @@ func Execute(cmd string, args []string, config string, target string, logger log
 func GetSensorData(ipmiOutput Result, excludeSensorIds []int64) ([]SensorData, error) {
 	var result []SensorData
 
-	if ipmiOutput.err != nil {
-		return result, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+	if ipmiOutput.Err != nil {
+		return result, fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 	}
 
-	r := csv.NewReader(bytes.NewReader(ipmiOutput.output))
+	r := csv.NewReader(bytes.NewReader(ipmiOutput.Output))
 	fields, err := r.ReadAll()
 	if err != nil {
 		return result, err
@@ -195,10 +205,10 @@ func GetSensorData(ipmiOutput Result, excludeSensorIds []int64) ([]SensorData, e
 }
 
 func GetCurrentPowerConsumption(ipmiOutput Result) (float64, error) {
-	if ipmiOutput.err != nil {
-		return -1, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+	if ipmiOutput.Err != nil {
+		return -1, fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 	}
-	value, err := getValue(ipmiOutput.output, ipmiDCMICurrentPowerRegex)
+	value, err := getValue(ipmiOutput.Output, ipmiDCMICurrentPowerRegex)
 	if err != nil {
 		return -1, err
 	}
@@ -206,10 +216,10 @@ func GetCurrentPowerConsumption(ipmiOutput Result) (float64, error) {
 }
 
 func GetChassisPowerState(ipmiOutput Result) (float64, error) {
-	if ipmiOutput.err != nil {
-		return -1, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+	if ipmiOutput.Err != nil {
+		return -1, fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 	}
-	value, err := getValue(ipmiOutput.output, ipmiChassisPowerRegex)
+	value, err := getValue(ipmiOutput.Output, ipmiChassisPowerRegex)
 	if err != nil {
 		return -1, err
 	}
@@ -224,10 +234,10 @@ func GetBMCInfoFirmwareRevision(ipmiOutput Result) (string, error) {
 	// The command may fail, but produce usable output (minus the system firmware revision).
 	// Try to recover gracefully from that situation by first trying to parse the output, and only
 	// raise the initial error if that also fails.
-	value, err := getValue(ipmiOutput.output, bmcInfoFirmwareRevisionRegex)
+	value, err := getValue(ipmiOutput.Output, bmcInfoFirmwareRevisionRegex)
 	if err != nil {
-		if ipmiOutput.err != nil {
-			return "", fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+		if ipmiOutput.Err != nil {
+			return "", fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 		}
 	}
 	return value, err
@@ -238,49 +248,27 @@ func GetBMCInfoManufacturerID(ipmiOutput Result) (string, error) {
 	// The command may fail, but produce usable output (minus the system firmware revision).
 	// Try to recover gracefully from that situation by first trying to parse the output, and only
 	// raise the initial error if that also fails.
-	value, err := getValue(ipmiOutput.output, bmcInfoManufacturerIDRegex)
+	value, err := getValue(ipmiOutput.Output, bmcInfoManufacturerIDRegex)
 	if err != nil {
-		if ipmiOutput.err != nil {
-			return "", fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+		if ipmiOutput.Err != nil {
+			return "", fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 		}
 	}
 	return value, err
 }
 
 func GetBMCInfoSystemFirmwareVersion(ipmiOutput Result) (string, error) {
-	if ipmiOutput.err != nil {
-		return "", fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+	if ipmiOutput.Err != nil {
+		return "", fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 	}
-	return getValue(ipmiOutput.output, bmcInfoSystemFirmwareVersionRegex)
-}
-
-func GetSELInfoEntriesCount(ipmiOutput Result) (float64, error) {
-	if ipmiOutput.err != nil {
-		return -1, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
-	}
-	value, err := getValue(ipmiOutput.output, ipmiSELEntriesRegex)
-	if err != nil {
-		return -1, err
-	}
-	return strconv.ParseFloat(value, 64)
-}
-
-func GetSELInfoFreeSpace(ipmiOutput Result) (float64, error) {
-	if ipmiOutput.err != nil {
-		return -1, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
-	}
-	value, err := getValue(ipmiOutput.output, ipmiSELFreeSpaceRegex)
-	if err != nil {
-		return -1, err
-	}
-	return strconv.ParseFloat(value, 64)
+	return getValue(ipmiOutput.Output, bmcInfoSystemFirmwareVersionRegex)
 }
 
 func GetRawOctets(ipmiOutput Result) ([]string, error) {
-	if ipmiOutput.err != nil {
-		return nil, fmt.Errorf("%s: %s", ipmiOutput.err, ipmiOutput.output)
+	if ipmiOutput.Err != nil {
+		return nil, fmt.Errorf("%s: %s", ipmiOutput.Err, ipmiOutput.Output)
 	}
-	strOutput := strings.Trim(string(ipmiOutput.output), " \r\n")
+	strOutput := strings.Trim(string(ipmiOutput.Output), " \r\n")
 	if !strings.HasPrefix(strOutput, "rcvd: ") {
 		return nil, fmt.Errorf("unexpected raw response: %s", strOutput)
 	}
