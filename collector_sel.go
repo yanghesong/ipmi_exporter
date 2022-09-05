@@ -16,6 +16,7 @@ package main
 import (
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
+	"strings"
 
 	"github.com/prometheus-community/ipmi_exporter/freeipmi"
 )
@@ -25,16 +26,9 @@ const (
 )
 
 var (
-	selEntriesCountDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "sel", "logs_count"),
-		"Current number of log entries in the SEL.",
-		[]string{},
-		nil,
-	)
-
-	selFreeSpaceDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "sel", "free_space_bytes"),
-		"Current free space remaining for new SEL entries.",
+	selGpuLeakStatusDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "sel", "gpu_leak_status"),
+		"Current Assertion Event for GPU Leak Status.",
 		[]string{},
 		nil,
 	)
@@ -51,29 +45,30 @@ func (c SELCollector) Cmd() string {
 }
 
 func (c SELCollector) Args() []string {
-	return []string{"--info"}
+	return []string{"-vv"}
 }
 
 func (c SELCollector) Collect(result freeipmi.Result, ch chan<- prometheus.Metric, target ipmiTarget) (int, error) {
-	entriesCount, err := freeipmi.GetSELInfoEntriesCount(result)
-	if err != nil {
-		level.Error(logger).Log("msg", "Failed to collect SEL data", "target", targetName(target.host), "error", err)
+	if result.Err != nil {
+		err := level.Error(logger).Log(
+			"msg", "Failed to collect GPU leak data", "target", targetName(target.host), "error", result.Err)
+		if err != nil {
+			return 0, err
+		}
 		return 0, err
 	}
-	freeSpace, err := freeipmi.GetSELInfoFreeSpace(result)
-	if err != nil {
-		level.Error(logger).Log("msg", "Failed to collect SEL data", "target", targetName(target.host), "error", err)
-		return 0, err
+
+	stringItem := strings.Split(string(result.Output), "\n")
+	var gpuLeakCount = 0
+	for _, value := range stringItem {
+		if strings.Contains(value, "GPU_Leak_Status") && strings.Contains(value, "Assertion") {
+			gpuLeakCount++
+		}
 	}
 	ch <- prometheus.MustNewConstMetric(
-		selEntriesCountDesc,
+		selGpuLeakStatusDesc,
 		prometheus.GaugeValue,
-		entriesCount,
-	)
-	ch <- prometheus.MustNewConstMetric(
-		selFreeSpaceDesc,
-		prometheus.GaugeValue,
-		freeSpace,
+		float64(gpuLeakCount),
 	)
 	return 1, nil
 }
