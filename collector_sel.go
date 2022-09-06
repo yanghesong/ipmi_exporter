@@ -32,6 +32,12 @@ var (
 		[]string{},
 		nil,
 	)
+	selMBLeakStatusDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "sel", "mb_leak_status"),
+		"Current Assertion Event for MB Leak Status.",
+		[]string{},
+		nil,
+	)
 )
 
 type SELCollector struct{}
@@ -60,15 +66,24 @@ func (c SELCollector) Collect(result freeipmi.Result, ch chan<- prometheus.Metri
 
 	stringItem := strings.Split(string(result.Output), "\n")
 	var gpuLeakCount = 0
+	var mbLeakCount = 0
 	for _, value := range stringItem {
 		if strings.Contains(value, "GPU_Leak_Status") && strings.Contains(value, "Assertion") {
 			gpuLeakCount++
+		}
+		if strings.Contains(value, "MB_Leak_Status") && strings.Contains(value, "Assertion") {
+			mbLeakCount++
 		}
 	}
 	ch <- prometheus.MustNewConstMetric(
 		selGpuLeakStatusDesc,
 		prometheus.GaugeValue,
 		float64(gpuLeakCount),
+	)
+	ch <- prometheus.MustNewConstMetric(
+		selMBLeakStatusDesc,
+		prometheus.GaugeValue,
+		float64(mbLeakCount),
 	)
 	return 1, nil
 }
